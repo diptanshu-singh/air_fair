@@ -1,0 +1,6 @@
+Travel Period ,Day Start,Day End,Reason
+Immediate ,0,3,No prediction
+Already too late,4,17,Prices are continuously increasing 
+Prime booking window,18,35,Prices are decreasing in this period
+Fish for offer,36,56,Fake price increases to make customers book tickets
+Constant pricing,56,90,Very less change in prices 
