@@ -1,0 +1,322 @@
+---
+title: "Fair Air Fare"
+author: "Diptanshu Singh"
+date: "December 6, 2018"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+Access the codes at : [github: https://github.com/diptanshu-singh/air_fair]
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r global_options, echo=FALSE}
+knitr::opts_chunk$set(fig.pos = 'H')
+```
+
+```{r include = FALSE}
+#Load packages
+library(tidyverse)
+library(readr)
+library(knitr)
+library(kableExtra)
+library(png)
+library(ggplot2)
+library(plotly)
+library(readxl)
+library(timelineS)
+library(tidyverse)
+library(xts)
+library(TTR)
+library(esquisse)
+library(lme4)
+library(kableExtra)
+library(shinystan)
+```
+## Abstract
+
+> Optimal time to buy the tickets can be viewed as tussle between buyers and sellers. Sellers can analyze huge amount of their past ticket data to judge demand, and model the prices accordingly. Dynamic airline pricing keeps the buyers guessing whether it is right time to book their ticket. The major roadblock that buyers face is lack of past data regarding price trend which is readily available to sellers. This project aims to build a tool that would help buyers make data driven decision on whether it is the right time to buy ticket. In order to make the decision easier, we will try to quantify the effect of waiting by providing the estimated reward and risk involved in waiting for next few days. A multilevel mixed effects model is used to predict price change occurring in the coming days. Based on previous data, effect of factors such as days to departure, day of booking and airline carrier has been used to explain price change. Multiple simulations are run to estimate the price of ticket 'n' days into the future. The implications and limitations for choosing multilevel mixed effects model are also discussed later. The report offers directional inferences to explain fluctuation in the price variance.
+
+## Introduction
+
+###Background
+Generic guidelines to book flights are given by research studies. These guidelines are not optimized according to route and hence will not be applicable in every situation. The project aims to build framework for analyzing each route based on its past data. A data warehouse can be created to store past daily ticket data for flights. While predicting the price trend in coming days, the model will draw inference from change in daily ticket prices over two weeks for a travel period of 3 months. Model validation can then be done to analyze how good the prediction has been. A more informed decision can be made by drawing inferences both from this model build only the particular route in conjecture to a generic model build utilizing data from multiple routes. It is expected the predictions from model build only on a particular route will have less bias and more variance. Whereas the model build on multiple route will have less variance. Weights can be decided based on result from model validation. Currently, the model validation has been done using additional 7 days’ data for the same travel duration. 
+
+
+###Previous Work
+Majority of the work on air fares involve prediction of air fare which is outside the scope of problem this project hopes to solve. Work done on modelling air ticket price is limited to routes or particular flights. As a result, such studies cannot be applied directly to a plane route. Many generic guidelines are also available to users while booking but these don't provide any quantitative support to ease decision making. This project aims to come up with a framework to use past data in order to make predictions for price trend of next few days. The current analysis has been done on one particular route from Boston to Los Angeles. 
+
+##Methods
+###Data source
+A WebCrawler on a major airline ticketing site has been setup. The crawler can be assessed from the GitHub link. It was scheduled to automatically pull data at 11pm daily for 21 days. First 14 days have been for building model. Next 5 days have been used for model validation. Currently, the crawler pulls data for route Boston(BOS) to Los Angeles(LAX) for travel dates from today to 104 days (90 days + 14 days) in future. The crawler can be easily modified to pull data for any other route by changing origin and destination station. The first page of this travel site which has 35 itineraries that have been scrapped. The data consists of the airline information, type of carrier, route and price information. Sample row being scrapped is shown below.
+
+```{r, echo = F, out.width = "90%" , out.height= "10%"}
+img1_path <- "flight.PNG"
+img1 <- readPNG(img1_path, native = TRUE, info = TRUE)
+
+# Small fig.width
+include_graphics(img1_path)
+```
+<div class="green4">
+**figure 2.1 : Data Elements scrapped**
+</div>
+
+
+###Exploratory Data analysis
+After initial data cleaning, and null value treatment, we have plotted the average ticket prices for the travel period below.
+```{r Cheapest, echo = FALSE , out.height= "50%"}
+#Consolidated data frame after data cleaning 
+day <- read.csv("14_day.csv")
+day <- day[c("airline", "arrival", "departure", "plane" , "stops", "price", "wk_day" , "n_day" ,"Date" , "CurrDate"  )]
+
+#Analysing cheapest price in coming period 
+as.data.frame(day %>%
+  select(Date, price) %>%
+  group_by(Date) %>%
+  summarize(cheap_price = min(price)) )-> cheapest
+
+
+`Cheapest Price in 14 days` <- xts(x=cheapest$cheap_price, order.by= as.Date(cheapest$Date,"%m/%d/%Y"))
+
+as.data.frame(day %>%
+  select(Date, price) %>%
+  group_by(Date) %>%
+  summarize(sd_price = sd(price)) )-> sd_price
+
+`Standard deviation in price in 14 days` <- xts(x=sd_price$sd_price, order.by= as.Date(sd_price$Date,"%m/%d/%Y"))
+
+`Cheapest Tickets Price` <- merge(`Cheapest Price in 14 days` , `Standard deviation in price in 14 days`)
+plot.xts( `Cheapest Tickets Price` , screens=c(1,2))
+```
+<div class="green4">
+**Figure 2.2 : Time Series of the cheapest price [Black] and standard deviation [Red] in price of ticket in 14 days. **
+</div>
+
+Figure 2.2 shows there are few travel dates on which the fare is quite high compared to others due to high demand. The standard deviation in prices is also high for those days. The data consists of 14 observations of 35 cheapest itineraries for each travel date. Since we are not considering demand as our predictor variable, we need to normalize and aggregate this data in meaningful way in order to model it. We can do this by:  
+1. Dividing all the prices by representative (average/cheapest) price in 14 days  
+2. Taking percentage difference of price with respect to previous day and modelling for this percent change  
+The 2nd method is chosen as the 1st doesn't favor scalability. Also for the first method, the representative price for a travel date will depend on the days since departure.
+
+The periodic spikes in standard deviation also suggests that the prices change a lot on particular days of a week. This indicates the day of booking ticket might be a good predictor estimating percent change.  
+
+```{r day_of_week, echo = FALSE , out.height= "50%"}
+
+#Plotting the cheapest ticket that an airline has for a particular day 
+cheap_day <- read.csv("ch_day.csv" , row.names = 1 , stringsAsFactors = F)
+
+#Normalized variables 
+df_per <- read.csv("df_per.csv" , row.names = 1)
+
+cheap_day$wk_day <-  factor(cheap_day$wk_day, levels= c("Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"))
+
+#Removing very costly ticket days 
+dow_data <- cheap_day[cheap_day$ch_price < 500,]
+
+ggplot(data = dow_data) +
+  aes(x = wk_day, y = ch_price, fill = wk_day) +
+  geom_boxplot() +
+  labs(title = "Variation of cheapest ticket prices by day of booking",
+    x = "Day of Booking",
+    y = "Ticket Price") +
+  theme_minimal()
+
+```
+<div class="green4" >
+**Figure 2.3  : Box plot of cheapest ticket price in 14 days on different day of week **
+</div>
+
+Figure 2.3 shows the distribution of cheapest ticket price as checked on various days. The travel period for all these days is same. The prices on Tuesday and Thursday are slightly less than the other days, indicating airlines might be giving better deals on these days. The 50 percentile price is low for Tuesday, Thursday and Friday.  Price on Wednesday have high variance and tend to more on the higher side. This indicates that day of booking might have some effect on ticket prices
+
+```{r days from departure , echo = FALSE , out.height= "50%"}
+
+df_per$week <- as.factor(round( df_per$n_day / 7 ))
+dod_data <- df_per[df_per$ch_price < 500,]
+
+ggplot(data = dod_data) +
+  aes(x = week, y = ch_price) +
+  geom_boxplot(fill = "#0c4c8a") +
+  labs(title = "Variation in cheapest ticket price vs Days to Departure",
+    x = " Weeks to Departure",
+    y = "Ticket price") +
+  theme_minimal()
+```
+<div class="green4" >
+**Figure 2.4  : Box plot of cheapest ticket price in 14 days vs weeks to departure**
+</div>
+
+Figure 2.4 indicates that that the weeks from departure has a non-linear effect on the ticket prices. We also see that there is substantial difference in the average ticket prices, but the cheapest ticket prices are not varying a lot. Much of this is because of some very low demand flights at odd times. The buyers may not be interested in such flight. In order to account for this, we will model the change in average prices. We will be predicting the average ticket price and using the predicted average price, we will calculate the cheapest price of ticket. Hence a two-step prediction would be done.  
+
+There is significant difference in prices. From Week 8 onwards, there is very less change in price with no visible trend whatsoever. So the price doesn’t vary much if the weeks to departure greater than 8. In between weeks 8 to 5, there is an increase in price. Sellers may be increasing the prices slowly in order to create perception of increasing prices for purchaser that is checking at regular intervals. The prices again decrease in weeks 3 to 5. This may be due to sellers reducing price in order to fill their seats. From week 3 to days of departure, there is consistent visible increase in price. The differences in ticket prices in the above graph can be due to two factors.  
+1. The demand of tickets price on certain days leading to high ticket    
+2. Price variation in tickets prices on different days of booking  
+
+In order to account for demand, we will be using random intercept of the date of travel.
+
+```{r travel period , echo = FALSE}
+
+tp <- read.csv("travel_period.csv")
+kable(tp) %>%
+  row_spec(0, bold = T)
+
+```
+In order to estimate price variations on different days, we will analyze the effect of days from departure. Since this will not be a linear relationship in the entire travelling period, we are dividing the variable days to departure into 5 travel periods given above.
+
+
+```{r airline , echo = FALSE , out.height= "50%"}
+avg_day <- read.csv("avg_day.csv", row.names = 1)
+
+airline_data <- avg_day[avg_day$av_price < 500,]
+
+ggplot(data = airline_data) +
+  aes(x = airline, y = av_price, fill = airline) +
+  geom_violin(scale = "area", adjust = 1) +
+  labs(title = "Variation in average price by airlines",
+    x = "Airline Carrier",
+    y = "Ticket Prices") +
+  theme_minimal() + 
+  theme (legend.position = 'bottom')
+```
+<div class="green4" >
+**Figure 2.5 :  Violin plot of average ticket price in 14 days for different airlines**
+</div>
+
+The data consisted of many small airlines data as well. We have removed airlines that are present in less than 10% of the dates. From figure 2.5, we see that United, Jet Blue, Delta and American Airlines have similar distribution of prices. This indicates that they may be involved in dynamic pricing based on competitor pricing. Spirit Airlines has cheapest tickets but the number of options available to users seem very less. Sun Country Airlines also has a very uniform distribution in prices. This may also be due to the fact that Sun Country and Spirit Airlines may not be having as many flight as the other four carriers. 
+
+###Model used
+In order to model average prices, we are using a multilevel linear effects model. For easier interpretation of coefficients of model, we used rstan_lmer function from rstanarm to fit the model. Based on the 50% credible interval for the predicted average price, we can calculate the estimated lower average price and upper average price. Using a simple linear regression model, we can estimate cheapest price of ticket. The probability to buy the ticket can then be found by calculated based on whether the cheapest price of ticket is closer to upper or lower bound of cheapest ticket price. 
+A simple linear regression model is run on top of this and predicts the cheapest price for every day using the average price for each airline. 
+
+$y \: = \: lmer((1|Date) + dd + week + airline + weekDay  + (dd|travelPeriod))$  
+where dd = days to departure 
+
+$cheapestPrice \: = lm(AveragePrice , week)$
+
+$Buy \: = I(chd < 0.9ch1)$  
+
+where chd = cheapest price on day 'd' , 'd+1' and 'd-1'   
+and d = day on which the cheapest price is predicted   
+and ch1 = cheapest price on day 1   
+
+Summary of the model can be found below: 
+
+```{r model summary , echo = FALSE}
+
+load(file = "C:/Users/Lenovo/Documents/R/air_fair/model1.RData")
+m1
+
+```
+
+##Result
+###Model choice
+Average prices are repeated measures of the ticket prices on various travel dates for 14 continuous days. The price will be driven by each day's demand in general. So we need to take into account the random effect of each travel date. After removing the random effect of each date due to demand, we are trying to understand the effect of days of departure, day of week and airlines on the average ticket prices. We see that the airlines follow each other closely, hence we have not included 'airline' as fixed effect. Summary of the model coefficients can be seen in the appendix. Using the average price predicted from the model, we will calculate the cheapest ticket price on the following days. Based on prediction of cheapest ticket price, we will find the day with the lowest ticket price and wait up until that day. The cheapest ticket price will be checked daily in this period daily. The strategy to buy ticket is that if the price falls below 10% of the cheapest ticket price on first day in this period. Since we are only performing the check in 7 days, there will be many cases in which the purchaser should not be buying ticket in the seven days. But since we don't know the future price, we will force the purchaser to buy the ticket within the seven days only. 
+
+###Interpretation 
+All the coefficients have been calculated according to the y_transformed. If the coefficient is > 0, it has positive effect on the price, hence it will increase the price. If the coefficient is <0, it has positive effect on the price. 
+
+####Fixed Effects:
+
+```{r Fixed week, echo = FALSE, out.height= "35%"}
+load(file = "C:/Users/Lenovo/Documents/R/air_fair/Code/week.RData")
+shinystan_multiparam_gg
+```
+
+Variable 'n_day' represents the days until departure. Week is taken as a categorical variable. This allows for the slope to positive or negative in different weeks. The coefficients of weeks are all significant. The effect of days since depature is dependent of both n_day and week. n_day is negative (median value : 0.00165). As the days to departure increase, the negative coefficient of n_day suggests decrease in price. On the other hand, the week parameter is positive. This allows for both positive and negative slopes along the travel duration.
+
+```{r Fixed day airline, echo = FALSE , out.height= "35%"}
+load(file = "C:/Users/Lenovo/Documents/R/air_fair/Code/day_airline.RData")
+shinystan_multiparam_gg
+```
+
+The coefficient for Thursday is negative indicating that there is decrease of price tickets on Thursdays. The coefficients on Sunday is highest indicating that the sellers are hiking up the price on Sundays when majority of people have free time and hence book their tickets.  
+Among airlines, Spirit airlines and Sun Country airlines have cheapest tickets. American Airlines, Delta and United airlines follow the same pattern as we saw in our data before. Among the most frequent flights, Jet Blue has tickets slightly on the cheaper side. 
+
+####Random Effects:  
+```{r Random, echo = FALSE  , out.height= "35%"}
+load(file = "C:/Users/Lenovo/Documents/R/air_fair/Code/random.RData")
+shinystan_multiparam_gg
+```
+Random effect of travel period is applied on top of n_day to allow the slope of n_day to be different in different travel periods.We shouldn't be looking at the significance level for the group level coefficients because they help in explaining some of the variance by pooling but they themselves may not neccessarily be significant. This model will be the least as predictive as a model without random effects. 
+
+As expected the within group variance in group: Date is very less compared to the overall standard deviation. Hence it is a good variable for grouping. Also, the within group variance of travel period is less than total standard deviation which tells the effect of days from departure is different from period to period. 
+
+###Model Testing framework
+In order to compare the model, we will use a naive strategy of buying the ticket as early as possible. Under this strategy, the purchaser buys the cheapest ticket at the time he checks. The purchaser checks the ticket prices on 2 December(Sunday) which is a neutral day with neither very high or low price. This is compared against the current strategy and the price difference is calculated. Since the posterior prediction are probabilistic, in order to get estimate of the money saved by using the strategy, we will run 1000 simulations for both the strategy. For the 1000 simulations, the difference in the ticket prices is calculated. The distribution of the total price difference can be seen in the histogram below. The user on an average saves US $29.44 with this strategy. 
+
+```{r money , echo = FALSE}
+diff <- read.csv("Compare.csv")
+hist(diff$diff , breaks = 20 , main = "Difference in daily ticket price")
+```
+
+###Model checking
+We checked for the assumptions of linear mixed effects model. For checking the accuracy of 1st model, an out of time frame validation was done. The histogram of actual and predicted values can be seen in appendix. Since the average prices were right skewed, we transformed the average price under the following transformation:  
+
+$y <- log ( \sqrt[2]{ averagePrice - min(averagePrice)}  )$
+
+ This reduces the right skew present in the data, but doesn't remove the inherent bimodal distribution in the data. The errors are normally distributed and the distribution of errors with respect to various important variables can be seen in appendix. We performed posterior predictive checking. If the data is a good fit for our model, the data generated from the model should resemble our actual model. The results can be seen under Section: Limitations. We also compared the average price in the predicted period. Also the error in the average prices (plot in appendix) resembled a normal distribution. 
+
+##Discussion
+
+###Limitation
+
+The model applies the condition of linearity on the average price with respect to days of departure. In order to compensate for this effect, we divided the entire travel period into different travel period. But within the categories, we are imposing average price to follow a linear trend. A better approximation would be allowing quadratic or higher order function to be used for estimating the trend. Hence regression using non-linear function might give us better result. 
+
+```{r, out.width = "90%" , echo = FALSE}
+img1_path <- "actvspred.PNG"
+img1 <- readPNG(img1_path, native = TRUE, info = TRUE)
+
+# Small fig.width
+include_graphics(img1_path)
+```
+<div class="green4">
+figure 2.1 
+</div>
+
+The distribution of average price is multi-modal and multilevel linear regression model can typically handle unimodal distributions. In order to fit this model better, we might need to divide the data into two categories ie high ticket price days and low ticket price days. We can determine whether the day lies in high or low day Using Expectation Maximization algorithm. The two corresponding unimodal distributions can then be better modelled using linear mixed effects.  
+
+The strategy for buying tickets can be modelled as well. The current strategy involves taking the ticket in coming few days, if the cheapest ticket is less than 10% of first day value. We can model the optimum percentage change based on the difference between the current price and the predicted price.
+
+###Future direction
+We will look into making the analysis more robust and analyze more flight paths using the methodology setup. The coefficients from different flight paths can then be compared. Factors having similar effects can then be grouped to set up a generic model for modelling price for any domestic US airport. This can be used in case when past data of the route of interest is not available for analysis. The factors with effects varying by route can be used for route specific analysis. Also in order to overcome the limitations mentioned above, we will use non-linear functions while evaluating the parameters. The final aim for this project is to come up with an app to provide users data to guide and judge the correct time to buy tickets. After completing the analysis and setting up generic as well as route based model, we will aim to create a webapp for the visualizing the results. 
+
+##Reference
+Gelman, A., and Hill, J. (2007). Data analysis using regression and multilevel/hierarchical models. New York: Cambridge University Press.  
+https://mjskay.github.io/tidybayes/articles/tidy-rstanarm.html  
+
+##Appendix
+
+```{r Appendix ,echo = FALSE , out.width= "90%"}
+print("Summary of model")
+
+rbind(read.csv("C:/Users/Lenovo/Documents/R/air_fair/Code/shiny_1.csv" , row.names = 1)[c("Rhat", "mean","X2.5.", "X97.5.")] , read.csv("C:/Users/Lenovo/Documents/R/air_fair/Code/shiny_2.csv" , row.names = 1) [c("Rhat", "mean","X2.5.", "X97.5.")])
+
+print("Distribution of average price")
+hist(avg_day$av_price , breaks = 50, main = "Distribution of average price")
+
+print("Error Distribution")
+img1_path <- "residuals.PNG"
+img1 <- readPNG(img1_path, native = TRUE, info = TRUE)
+
+# Small fig.width
+include_graphics(img1_path)
+
+
+print("Actual vs Predicted values")
+img1_path <- "avg.PNG"
+img1 <- readPNG(img1_path, native = TRUE, info = TRUE)
+
+# Small fig.width
+include_graphics(img1_path)
+
+avg_pred <- read.csv("avg_day_predicted.csv")
+
+print("Histograms of average ticket prices from out of frame validation")
+print("Histograms of actual average ticket prices")
+
+hist(avg_pred$av_price  , breaks = 50 , main  = "Actual Average Prices")
+print("Histograms of predicted average ticket prices")
+
+hist(avg_pred$med , breaks = 50 , main = "Predicted Average Prices")
+
+```
