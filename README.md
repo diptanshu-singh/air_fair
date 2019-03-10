@@ -1,4 +1,5 @@
 # Air Fair ( Is the Air Fare Fair as of now)? 
+# Should you buy the ticket or wait?
 
 This analysis hopes to anser the question, whether it is the right time to book the flight
 
